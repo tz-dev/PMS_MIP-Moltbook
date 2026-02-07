@@ -1,0 +1,475 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =============================================================================
+# mbot CLI (M3)
+#   mbot run [--dry-run] [--force]
+#   mbot reply --post <POST_ID> [--dry-run] [--force]
+#   mbot reply --thread <THREAD_ID> [--dry-run] [--force]
+#   mbot reply --url <POST_URL> [--dry-run] [--force]
+#   mbot comment --post <POST_ID> --text-file <FILE> [--dry-run] [--force]
+# =============================================================================
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/lib/api.sh"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/lib/state.sh"
+# candidates
+source "$ROOT_DIR/lib/candidates.sh"
+# filter scores
+source "$ROOT_DIR/lib/filter_score.sh"
+# router/writer/wrapper pipeline (M4+)
+# shellcheck disable=SC1091
+source "$ROOT_DIR/lib/router.sh"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/lib/writer.sh"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/lib/wrapper.sh"
+# success post HTML log
+# shellcheck disable=SC1091
+source "$ROOT_DIR/lib/success_posts.sh"
+
+DRY_RUN=0
+FORCE=0
+
+usage() {
+  cat <<'USAGE'
+mbot - Moltbook agent CLI
+
+Usage:
+  mbot run [--dry-run] [--force]
+
+  mbot reply --post <POST_ID> [--dry-run] [--force]
+  mbot reply --thread <THREAD_ID> [--dry-run] [--force]
+  mbot reply --url <https://www.moltbook.com/post/...> [--dry-run] [--force]
+
+  mbot comment --post <POST_ID> --text-file <FILE> [--dry-run] [--force]
+
+Flags:
+  --dry-run   Print what would be done, do not post
+  --force     Ignore seen-thread dedupe (still won't comment on own posts)
+  -h|--help   Show help
+
+Notes:
+  --thread behavior (M3): currently treats THREAD_ID as the post id to reply on.
+  In M4/M5 we will normalize thread_id/root_id and implement "reply to root/newest" policy.
+USAGE
+}
+
+die() { echo "[mbot] ERROR: $*" >&2; exit 1; }
+log() { echo "[mbot] $*" >&2; }
+
+# Global flag parsing (anywhere), without subshell side-effects.
+FILTERED_ARGS=()
+parse_global_flags() {
+  FILTERED_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1; shift ;;
+      --force)   FORCE=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) FILTERED_ARGS+=("$1"); shift ;;
+    esac
+  done
+}
+
+# Extract post UUID from moltbook URL like:
+# https://www.moltbook.com/post/<uuid>
+parse_post_id_from_url() {
+  local url="$1"
+  if [[ "$url" =~ ^https://www\.moltbook\.com/post/([0-9a-fA-F-]{36}) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    die "Could not parse post id from URL: $url"
+  fi
+}
+
+# Unwrap API responses that sometimes use {data:{...}} and sometimes not.
+unwrap_data() {
+  jq -c '(.data // .)' <<<"$1"
+}
+
+# =============================================================================
+# Pipeline: post_json -> candidate_json -> router -> writer -> wrapper -> comment
+# =============================================================================
+
+# Build a normalized candidate object from a fetched post/root object.
+# This matches what candidates.sh emits, but we also use it for reply --post.
+candidate_from_post_root() {
+  local root_json="$1"
+  jq -c '{
+    id: (.id // ""),
+    thread_id: (.thread_id // .root_id // .parent_id // .id // .id // ""),
+    title: (.title // ""),
+    content: (.content // ""),
+    author: (.author.name // ""),
+    submolt: (.submolt.name // "")
+  }' <<<"$root_json"
+}
+
+# Run full pipeline and return final wrapped comment body.
+# Prints body to stdout.
+run_full_pipeline_for_candidate() {
+  local cand_json="$1"
+  local nonce="$2"
+
+  # Router decision
+  local route_json
+  route_json="$(route_candidate "$cand_json")"
+  route_json="$(enrich_route_with_addon "$route_json")"
+
+  # Respect router "should_comment"
+  if jq -e '.should_comment == false' >/dev/null 2>&1 <<<"$route_json"; then
+    log "Router decided should_comment=false reason=$(jq -r '.reason' <<<"$route_json") risk_flags=$(jq -c '.risk_flags' <<<"$route_json")"
+    return 2
+  fi
+
+  # Writer creates BODY
+  local body
+  body="$(write_body "$cand_json" "$route_json")"
+
+  # Wrapper adds branding + links + nonce
+  local addon_json
+  addon_json="$(jq -c '.addon // {}' <<<"$route_json")"
+  local wrapped
+  wrapped="$(wrap_comment "$body" "$route_json" "$addon_json" "$nonce")"
+
+  printf '%s' "$wrapped"
+  return 0
+}
+
+# =============================================================================
+# Reply to a specific post id (full pipeline)
+# =============================================================================
+do_reply_to_post_id() {
+  local post_id="$1"
+  local nonce="$2"
+
+  # Fetch post
+  local post_json root
+  post_json="$(get_post "$post_id")"
+  root="$(unwrap_data "$post_json")"
+
+  # Basic fields (null-safe)
+  local title content author submolt thread_id
+  title="$(jq -r '.title // ""' <<<"$root")"
+  content="$(jq -r '.content // ""' <<<"$root")"
+  author="$(jq -r '.author.name // ""' <<<"$root")"
+  submolt="$(jq -r '.submolt.name // ""' <<<"$root")"
+  thread_id="$(jq -r '.thread_id // .root_id // .parent_id // .id // ""' <<<"$root")"
+  [[ -n "$thread_id" ]] || thread_id="$post_id"
+
+  # Do not comment on own post (hard stop)
+  if [[ -n "${SELF_AGENT_NAME:-}" ]] && [[ "$author" == "$SELF_AGENT_NAME" ]]; then
+    log "Skipped: own post"
+    exit 0
+  fi
+
+  # Dedupe on thread (unless --force) — only for real posting
+  if [[ "$DRY_RUN" == "0" ]] && [[ "$FORCE" == "0" ]] && state_seen_contains "$thread_id"; then
+    log "Skipped: already commented in thread=$thread_id"
+    exit 0
+  fi
+
+  # Build candidate JSON
+  local cand_json
+  cand_json="$(candidate_from_post_root "$root")"
+  # ensure thread_id is set
+  cand_json="$(jq -c --arg tid "$thread_id" '.thread_id = ($tid | if .=="" then .id else . end)' <<<"$cand_json")"
+
+  # Run full pipeline (router->writer->wrapper)
+  local final_body
+  if ! final_body="$(run_full_pipeline_for_candidate "$cand_json" "$nonce")"; then
+    local rc=$?
+    if [[ "$rc" == "2" ]]; then
+      log "Skipped: router should_comment=false"
+      exit 0
+    fi
+    die "pipeline failed rc=$rc"
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "$final_body"
+    exit 0
+  fi
+
+  # Lock only when writing
+  if ! state_lock_acquire; then
+    exit 0
+  fi
+
+  # Respect cooldowns only when writing
+  if ! state_can_comment; then
+    local rc=$?
+    if [[ "$rc" == "1" ]]; then
+      log "Blocked by comment cooldown."
+      exit 0
+    elif [[ "$rc" == "2" ]]; then
+      log "Blocked by daily comment limit."
+      exit 0
+    else
+      die "Blocked by unknown state_can_comment rc=$rc"
+    fi
+  fi
+
+  # Post comment
+  local resp
+  resp="$(create_comment "$post_id" "$final_body")"
+
+  if jq -e '.success == true or .data or .comment or .id' >/dev/null 2>&1 <<<"$resp"; then
+    log "Comment posted on post=$post_id thread=$thread_id"
+
+    add_success_post \
+      "$title" \
+      "$author" \
+      "https://www.moltbook.com/u/$author" \
+      "$post_id" \
+      "https://www.moltbook.com/post/$post_id"
+
+    state_seen_add "$thread_id"
+    state_note_comment_success
+    state_set_last_run "$nonce" "$post_id" "$thread_id"
+    exit 0
+  fi
+
+  log "Post failed. Response:"
+  echo "$resp" >&2
+  exit 1
+}
+
+# =============================================================================
+# Reply to a selected candidate object (full pipeline)
+# =============================================================================
+do_reply_to_candidate_json() {
+  local cand_json="$1"
+  local nonce="$2"
+
+  local post_id thread_id title content author submolt
+  post_id="$(jq -r '.id' <<<"$cand_json")"
+  thread_id="$(jq -r '.thread_id // .id' <<<"$cand_json")"
+  title="$(jq -r '.title // ""' <<<"$cand_json")"
+  content="$(jq -r '.content // ""' <<<"$cand_json")"
+  author="$(jq -r '.author // ""' <<<"$cand_json")"
+  submolt="$(jq -r '.submolt // ""' <<<"$cand_json")"
+
+  [[ -n "$post_id" ]] || die "candidate missing id"
+  [[ -n "$thread_id" ]] || thread_id="$post_id"
+
+  # Dedupe (only when writing)
+  if [[ "$DRY_RUN" == "0" ]] && [[ "$FORCE" == "0" ]] && state_seen_contains "$thread_id"; then
+    log "Skipped: already commented in thread=$thread_id"
+    exit 0
+  fi
+
+  if [[ -n "${SELF_AGENT_NAME:-}" ]] && [[ "$author" == "$SELF_AGENT_NAME" ]]; then
+    log "Skipped: own post"
+    exit 0
+  fi
+
+  # Run full pipeline (router->writer->wrapper)
+  local final_body
+  if ! final_body="$(run_full_pipeline_for_candidate "$cand_json" "$nonce")"; then
+    local rc=$?
+    if [[ "$rc" == "2" ]]; then
+      log "Skipped: router should_comment=false"
+      exit 0
+    fi
+    die "pipeline failed rc=$rc"
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "$final_body"
+    exit 0
+  fi
+
+  # Lock only when writing
+  if ! state_lock_acquire; then exit 0; fi
+
+  # Cooldowns only when writing
+  if ! state_can_comment; then
+    local rc=$?
+    log "Blocked by state_can_comment rc=$rc"
+    exit 0
+  fi
+
+  local resp
+  resp="$(create_comment "$post_id" "$final_body")"
+  if jq -e '.success == true or .data or .comment or .id' >/dev/null 2>&1 <<<"$resp"; then
+    log "Comment posted on post=$post_id thread=$thread_id"
+    add_success_post \
+      "$title" \
+      "$author" \
+      "https://www.moltbook.com/u/$author" \
+      "$post_id" \
+      "https://www.moltbook.com/post/$post_id"
+    
+    state_seen_add "$thread_id"
+    state_note_comment_success
+    state_set_last_run "$nonce" "$post_id" "$thread_id"
+    exit 0
+  fi
+
+  log "Post failed. Response:"
+  echo "$resp" >&2
+  exit 1
+}
+
+# =============================================================================
+# Commands
+# =============================================================================
+
+cmd_run() {
+  local nonce; nonce="$(state_gen_run_nonce)"
+  log "run nonce=$nonce"
+
+  # Init state always
+  state_init
+
+  # writing run needs lock unless dry-run
+  if [[ "$DRY_RUN" == "0" ]]; then
+    if ! state_lock_acquire; then exit 0; fi
+    if ! state_can_comment; then
+      local rc=$?
+      log "Blocked by state_can_comment rc=$rc"
+      exit 0
+    fi
+  fi
+
+  local candidates top
+  candidates="$(gather_candidates)"
+
+  # If dry-run, do NOT drop seen threads? we still should, unless --force
+  if [[ "$FORCE" == "1" ]]; then
+    # select_best_candidate drops seen threads; emulate force by temporarily bypassing seen:
+    # simplest: score filtered and pick without drop_seen_threads.
+    local filtered scored
+    filtered="$(filter_candidates "$candidates")"
+    scored="$(score_candidates "$filtered")"
+    top="$(pick_top_candidate "$scored")"
+  else
+    top="$(select_best_candidate "$candidates")"
+  fi
+
+  if [[ -z "$top" ]]; then
+    log "No suitable candidate found."
+    if [[ "$DRY_RUN" == "0" ]]; then
+      state_set_last_run "$nonce" "null" "null"
+    fi
+    exit 0
+  fi
+
+  local post_id thread_id
+  post_id="$(jq -r '.id' <<<"$top")"
+  thread_id="$(jq -r '.thread_id // .id' <<<"$top")"
+
+  log "Selected post=$post_id thread=$thread_id score=$(jq -r '.score' <<<"$top") submolt=$(jq -r '.submolt' <<<"$top")"
+
+  # Delegate to full pipeline
+  do_reply_to_candidate_json "$top" "$nonce"
+}
+
+cmd_reply() {
+  local mode="" post_id="" thread_id="" url=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --post)   mode="post"; post_id="${2:-}"; shift 2 ;;
+      --thread) mode="thread"; thread_id="${2:-}"; shift 2 ;;
+      --url)    mode="url"; url="${2:-}"; shift 2 ;;
+      *) break ;;
+    esac
+  done
+
+  local nonce; nonce="$(state_gen_run_nonce)"
+
+  # init state always
+  state_init
+
+  case "$mode" in
+    post)
+      [[ -n "$post_id" ]] || die "--post requires a POST_ID"
+      do_reply_to_post_id "$post_id" "$nonce"
+      ;;
+    thread)
+      [[ -n "$thread_id" ]] || die "--thread requires a THREAD_ID"
+      do_reply_to_post_id "$thread_id" "$nonce"
+      ;;
+    url)
+      [[ -n "$url" ]] || die "--url requires a moltbook post URL"
+      post_id="$(parse_post_id_from_url "$url")"
+      do_reply_to_post_id "$post_id" "$nonce"
+      ;;
+    *)
+      die "reply requires one of: --post/--thread/--url"
+      ;;
+  esac
+}
+
+cmd_comment() {
+  local post_id="" text_file=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --post) post_id="${2:-}"; shift 2 ;;
+      --text-file) text_file="${2:-}"; shift 2 ;;
+      *) break ;;
+    esac
+  done
+
+  [[ -n "$post_id" ]] || die "comment requires --post <POST_ID>"
+  [[ -n "$text_file" ]] || die "comment requires --text-file <FILE>"
+  [[ -f "$text_file" ]] || die "text file not found: $text_file"
+
+  local nonce; nonce="$(state_gen_run_nonce)"
+  local body; body="$(cat "$text_file")"
+  body="${body}"$'\n\n----------------------\n'"${nonce}"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "$body"
+    exit 0
+  fi
+
+  # init state always
+  state_init
+
+  if ! state_lock_acquire; then exit 0; fi
+
+  if ! state_can_comment; then
+    local rc=$?
+    log "Blocked by state_can_comment rc=$rc"
+    exit 0
+  fi
+
+  local resp
+  resp="$(create_comment "$post_id" "$body")"
+  if jq -e '.success == true or .data or .comment or .id' >/dev/null 2>&1 <<<"$resp"; then
+    log "Comment posted on post=$post_id"
+    state_note_comment_success
+    state_set_last_run "$nonce" "$post_id" "$post_id"
+    exit 0
+  fi
+
+  log "Post failed. Response:"
+  echo "$resp" >&2
+  exit 1
+}
+
+main() {
+  [[ $# -gt 0 ]] || { usage; exit 1; }
+
+  local cmd="$1"; shift
+
+  parse_global_flags "$@"
+  set -- "${FILTERED_ARGS[@]}"
+
+  case "$cmd" in
+    run)     cmd_run "$@" ;;
+    reply)   cmd_reply "$@" ;;
+    comment) cmd_comment "$@" ;;
+    -h|--help|help) usage ;;
+    *) die "Unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

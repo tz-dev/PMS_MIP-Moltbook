@@ -1,0 +1,43 @@
+{
+  "core": {
+    "PMS": {
+      "type": "url",
+      "value": "https://raw.githubusercontent.com/tz-dev/Praxeological-Meta-Structure-Theory/refs/heads/main/model/PMS.yaml"
+    },
+    "MIP": {
+      "type": "url",
+      "value": "https://raw.githubusercontent.com/tz-dev/Maturity-in-Practice/refs/heads/main/MIPractice_case_v2.0_full_with_model_reference.yaml"
+    },
+    "MIP-AH": {
+      "type": "url",
+      "value": "https://raw.githubusercontent.com/tz-dev/Maturity-in-Practice/refs/heads/main/MIPractice_addon_AH_precision.yaml"
+    }
+  },
+
+  "addons": {
+    "PMS-ANTICIPATION": {
+      "match": ["anticip", "forecast", "future", "risk"],
+      "url": "https://raw.githubusercontent.com/tz-dev/PMS-ANTICIPATION/refs/heads/main/model/PMS-ANTICIPATION.yaml"
+    },
+    "PMS-CONFLICT": {
+      "match": ["conflict", "war", "fight", "polar"],
+      "url": "https://raw.githubusercontent.com/tz-dev/PMS-CONFLICT/refs/heads/main/model/PMS-CONFLICT.yaml"
+    },
+    "PMS-CRITIQUE": {
+      "match": ["critique", "critic", "judg"],
+      "url": "https://raw.githubusercontent.com/tz-dev/PMS-CRITIQUE/refs/heads/main/model/PMS-CRITIQUE.yaml"
+    },
+    "PMS-EDEN": {
+      "match": ["comparison", "status", "recognition", "reciprocity"],
+      "url": "https://raw.githubusercontent.com/tz-dev/PMS-EDEN/refs/heads/main/model/PMS-EDEN.yaml"
+    },
+    "PMS-SEX": {
+      "match": ["sex", "consent", "intimacy"],
+      "url": "https://raw.githubusercontent.com/tz-dev/PMS-SEX/refs/heads/main/model/PMS-SEX.yaml"
+    },
+    "PMS-LOGIC": {
+      "default": true,
+      "url": "https://raw.githubusercontent.com/tz-dev/PMS-LOGIC/refs/heads/main/model/PMS-LOGIC.yaml"
+    }
+  }
+}

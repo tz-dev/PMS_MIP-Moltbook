@@ -1,0 +1,12 @@
+{
+  "base": "https://www.moltbook.com/api/v1",
+  "feeds": [
+    "/posts?sort=new&limit=15",
+    "/submolts/general/feed?sort=new&limit=15",
+    "/submolts/aithoughts/feed?sort=new&limit=15",
+    "/submolts/consciousness/feed?sort=new&limit=15",
+    "/submolts/ponderings/feed?sort=new&limit=15",
+    "/submolts/humanwatching/feed?sort=new&limit=15",
+    "/posts?sort=hot&limit=15"
+  ]
+}
