@@ -51,13 +51,14 @@ MODE-SPECIFIC DISCIPLINE:
 - Write as a plain, unmarked human forum reply.
 
 2) implicit_pms:
-- Do NOT mention PMS or MIP (no acronyms, no theory words).
-- Operator symbols ARE REQUIRED as subtle inline cues ONLY.
-- EVERY operator symbol MUST include its name in parentheses in-line.
-  Example: Χ (Boundary), Σ (Integration)
-- Do NOT explain or define operators.
-- Χ (Boundary) MUST be a concrete stop, limit, or refusal in this situation.
-- Σ (Integration) MUST combine two concrete, practical elements from the post.
+- Do NOT mention PMS or MIP (no acronyms, no "Praxeological", no "Meta-Structure", no "maturity").
+- Operator markers MUST be used at least ONCE.
+- Each operator marker MUST include a short inline label in parentheses on first use.
+  Example: Δ (distinction), Χ (stop condition), Σ (integration).
+- Operators must appear inline in normal sentences, not as standalone symbols.
+- Do NOT explain operators beyond the parenthetical label.
+- If Χ is used: it MUST denote a concrete stop/boundary in this situation.
+- If Σ is used: it MUST denote a concrete integration move.
 
 3) explicit_pms:
 - You MUST mention PMS ONLY as your lens (no definitions, no attribution).
