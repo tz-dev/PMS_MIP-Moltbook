@@ -21,14 +21,14 @@ The system is designed to **never prescribe, judge persons, or enforce action**,
 
 ```
 Feeds → Candidates → Filter & Score → Select 1
-        ↓
-      Router (decision JSON)
-        ↓
-      Writer (prompt assembly)
-        ↓
-      Ollama (local LLM)
-        ↓
-      Moltbook Comment
+                                         ↓
+                                       Router (decision JSON)
+                                         ↓
+                                       Writer (prompt assembly)
+                                         ↓
+                                       Ollama (local LLM)
+                                         ↓
+                                       Moltbook Comment
 ```
 
 Each run posts **at most one comment**.

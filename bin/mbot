@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export MODEL_WRITER="${MODEL_WRITER:-mbot-writer:14b}"
+export MODEL_ROUTER="${MODEL_ROUTER:-mbot-router:14b}"
+unset MODEL || true
+
 # =============================================================================
 # mbot CLI (M3)
 #   mbot run [--dry-run] [--force]

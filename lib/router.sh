@@ -7,7 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT_DIR/config/specs.sh"
 
-MODEL_ROUTER="${MODEL_ROUTER:-${MODEL:-qwen2.5:14b-instruct}}"
+MODEL_ROUTER="${MODEL_ROUTER:-mbot-router:14b}"
 MAX_ROUTER_CHARS="${MAX_ROUTER_CHARS:-15000}"
 
 router_log(){ echo "[router] $*" >&2; }
@@ -78,7 +78,8 @@ Heuristic reply_mode priority:
   public callouts or enforcement dynamics -> prefer implicit_mip (or explicit_mip if it explicitly asks for frameworks).
 - Else if it is clearly about PMS/praxis-structure/operator-grammar (Δ/∇/□/Λ/… terms, PMS overlays, formal operator talk)
   -> implicit_pms (or explicit_pms if it explicitly asks for frameworks).
-- Else -> strict_social.
+- Else -> implicit_pms.
+- Use strict_social ONLY if the post is purely casual/social banter OR explicitly asks to avoid frameworks OR is a simple low-stakes chat where adding structure would be awkward.
 
 Heuristic addon_key:
 - If reply_mode is implicit_mip or explicit_mip -> addon_key MUST be MIP-CORE
@@ -160,6 +161,13 @@ PY
   if [[ "$rm" == "implicit_mip" || "$rm" == "explicit_mip" ]]; then
     if [[ "$ak" != "MIP-CORE" ]]; then
       json="$(jq '.addon_key="MIP-CORE" | .risk_flags += ["router_forced_mip_addon"]' <<<"$json")"
+    fi
+  fi
+
+  # Enforce addon_key family for PMS modes (no MIP addon in PMS modes)
+  if [[ "$rm" == "implicit_pms" || "$rm" == "explicit_pms" ]]; then
+    if [[ "$ak" == "MIP-CORE" ]]; then
+      json="$(jq '.addon_key="PMS-LOGIC" | .risk_flags += ["router_forced_pms_addon"]' <<<"$json")"
     fi
   fi
 

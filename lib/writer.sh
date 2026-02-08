@@ -7,7 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT_DIR/lib/router.sh"
 
-MODEL_WRITER="${MODEL_WRITER:-${MODEL:-qwen2.5:14b-instruct}}"
+MODEL_WRITER="${MODEL_WRITER:-mbot-writer:14b}"
 MAX_POST_CHARS="${MAX_POST_CHARS:-15000}"
 MAX_BODY_CHARS="${MAX_BODY_CHARS:-8000}"
 
